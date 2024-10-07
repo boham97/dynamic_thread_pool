@@ -44,6 +44,7 @@ void free_queue(struct  Queue* que);
 void error_handling(char *message);
 void* get_message(void* args);
 void* gc(void* args);
+
 int main(int argc, char *argv[]){
 	int serv_sock;
 	int clnt_sock;
@@ -97,7 +98,6 @@ int main(int argc, char *argv[]){
 		if(clnt_sock==-1)
 	    	error_handling("accept() error");
         if(running == MAX){
-            printf("MAX CONNECTION please wait!\n", clnt_sock);
 			if(send(clnt_sock, message1, sizeof(message2)-1, MSG_DONTWAIT ) == -1) error_handling("send error");;
 			if(send(clnt_sock, message2, sizeof(message2)-1, MSG_DONTWAIT ) == -1) error_handling("send error");
             append(client_que, clnt_sock);
@@ -127,12 +127,12 @@ void* get_message(void* args){
 	int clnt_sock;  																	// client_sock 정보 받기
 	while(1){
     	sem_wait(&connection);
-		clnt_sock = popleft(client_que);												//
-        if (clnt_sock == 0){                                                    		//종료 스레드 큐에 스레드 index 넣기
+		clnt_sock = popleft(client_que);												//클라이언트 큐에서 소켓 id pop
+        if (clnt_sock == 0){                                                    		//gc종료 스레드 큐에 스레드 index 넣기
 		    close(clnt_sock);
 
     	    printf("socket id %d closed \n", clnt_sock);
-            end_time[running--] = 0;                                                    //수정 필요!!!!!!
+            end_time[running--] = (long)time(NULL);
             sem_post(&connection);
             continue;
         }
@@ -150,7 +150,8 @@ void* get_message(void* args){
 		sem_wait(&connection);
 		close(clnt_sock);
     	printf("socket id %d closed \n", clnt_sock);                            		//종료 스레드 큐에 스레드 index 넣기
-        end_time[running--] = 0;                                            	//현재 시간ㄲㄲ  <====수정;
+		
+        end_time[running--] = (long)time(NULL);                                            	//종료시간 현재 시간으로 변경
 		sem_post(&connection);
 	}
 	return NULL;
@@ -160,7 +161,7 @@ void* gc(void* args){
 		sem_wait(&connection);
     	while (1){
     	    if(waiting == MIN || waiting == running) break;
-    	    if(time - end_time[waiting--] > 60){                                   //<== 스레드 세이프한 현재 시간 받아서 비교
+    	    if((long)time(NULL) - end_time[waiting--] > 60){                                   // 현재 시간 받아서 비교
 				append(client_que, 0);
     	    }else{
     	        break;
