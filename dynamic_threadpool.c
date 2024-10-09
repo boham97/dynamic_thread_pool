@@ -15,12 +15,15 @@
 
 #define MAX 20
 #define MIN 4
-static sem_t connection;
 
 static int running = 0;
 static int waiting = 0;
+static int thread_id[MAX] = {0};
 static long end_time[MAX] = {0};
-static int mq_id;
+
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+
 
 struct Node
 {
@@ -49,6 +52,7 @@ int main(int argc, char *argv[]){
 	int serv_sock;
 	int clnt_sock;
     int str_len;
+	int pthread_id;
 	int input[2];
 	char message1[30] = "max connection";
 	char message2[30] = "plez wait";
@@ -57,9 +61,12 @@ int main(int argc, char *argv[]){
 	thread_que = queue_init();
 
     pthread_t gc;                                                                       //msg_id 2l로 thread index 받기
-	pthread_t pthread_list[MAX + 1];												    //thread MAX개 생성 준비
+	pthread_t pthread_list[MAX + 1];
+	for(int i =0; i < MAX; i++){
+		thread_id[i] = i;
+	}												    //thread MAX개 생성 준비
 	for (int i = 0; i < MIN; i++){
-		pthread_create(&pthread_list[i], NULL, get_message, (void*)&mq_id);             // 최소 유지되는 쓰레드 생성
+		pthread_create(&pthread_list[i], NULL, get_message, (void*)thread_id + i);             // 최소 유지되는 쓰레드 생성
         waiting++;
 	}
 	for (int i = MIN; i < MAX + 1; i++){                                                //생성할 수 있는 쓰레드 index 큐에 넣기
@@ -87,33 +94,34 @@ int main(int argc, char *argv[]){
 		error_handling("listen() error");
 		return 0;
 	}
-    if(sem_init(&connection, 0, 1) < 0){                     							// 두번째: 프로세스 공유 여부 세 번째 인자: 공유 자원 동시 접근수
-        printf("semaphore making fail\n");
-        return 0;
-    };
+
 	printf("server is listening!\n", clnt_sock);	
 	while(1) {
 	    clnt_sock=accept(serv_sock, (struct sockaddr*)&clnt_addr, &clnt_addr_size); 	// 연결요청이 있을 때 까지 함수는 반환되지 않음
-        sem_wait(&connection);
-		if(clnt_sock==-1)
+        pthread_mutex_lock(&mutex);
+		if(clnt_sock == -1){
 	    	error_handling("accept() error");
+			pthread_mutex_unlock(&mutex);
+			continue;
+		}
         if(running == MAX){
 			if(send(clnt_sock, message1, sizeof(message2)-1, MSG_DONTWAIT ) == -1) error_handling("send error");;
 			if(send(clnt_sock, message2, sizeof(message2)-1, MSG_DONTWAIT ) == -1) error_handling("send error");
-            append(client_que, clnt_sock);
+			close(clnt_sock);
 		}else{
-            if (running == waiting){                                                     //대기중인 쓰레드 없으면 생성
-                waiting++;
-                pthread_create(&pthread_list[popleft(thread_que)], NULL, get_message, (void*)&mq_id);
+            if (running == waiting++){                                                     //대기중인 쓰레드 없으면 생성
+				pthread_id = popoleft(thread_que);
+                pthread_create(&pthread_list[pthread_id], NULL, get_message, (void*)thread_id + pthread_id);
             }
 			running++;
 			append(client_que, clnt_sock);												//clnt_sock 큐에 넣기
+			pthread_cond_signal(&cond);
 		}
-		sem_post(&connection);
+		pthread_mutex_unlock(&mutex);
     }
 	printf("server close\n");
 	close(serv_sock);
-
+	pthread_mutex_destroy(&mutex);
 	return 0;
 }
 void error_handling(char *message){
@@ -121,44 +129,46 @@ void error_handling(char *message){
 	fputc('\n', stderr);
 }
 void* get_message(void* args){
-	int mq_id = *(int*) args;
+	int pthread_id = *(int*) args;
     int str_len;
     int temp;
 	int clnt_sock;  																	// client_sock 정보 받기
 	while(1){
-    	sem_wait(&connection);
+    	pthread_mutex_lock(&mutex);
+		pthread_cond_wait(&cond, &mutex);
 		clnt_sock = popleft(client_que);												//클라이언트 큐에서 소켓 id pop
         if (clnt_sock == 0){                                                    		//gc종료 스레드 큐에 스레드 index 넣기
 		    close(clnt_sock);
-
+			append(thread_que, pthread_id);
     	    printf("socket id %d closed \n", clnt_sock);
             end_time[running--] = (long)time(NULL);
-            sem_post(&connection);
+            pthread_mutex_unlock(&mutex);
             continue;
         }
-		sem_post(&connection);        
+		pthread_mutex_unlock(&mutex);
+
     	printf("socket id: %d thread id: %lu\n", clnt_sock, pthread_self());
-		char message[30];																//마지막 메세지는 "exit"일수 있다
-		while(strcmp(message, "exit") != 0){
+		char message[30];													
+		while(1){
 		    str_len=read(clnt_sock, message, sizeof(message)-1);
-		    if(str_len==-1) {error_handling("read() error"); return NULL;}
+		    if(str_len==-1) {error_handling("read() error"); break;}
 			str_len = send(clnt_sock, message, sizeof(message)-1, MSG_DONTWAIT);
     	    if(str_len == 0) error_handling("send error");
     	    printf("socket id %d:", clnt_sock);
     	    printf("%s\n", message);
     	}
-		sem_wait(&connection);
+		pthread_mutex_lock(&mutex);
 		close(clnt_sock);
-    	printf("socket id %d closed \n", clnt_sock);                            		//종료 스레드 큐에 스레드 index 넣기
-		
+    	printf("socket id %d closed \n", clnt_sock);                            		//쓰레드 대기
+		append(thread_que, thread_id); 
         end_time[running--] = (long)time(NULL);                                            	//종료시간 현재 시간으로 변경
-		sem_post(&connection);
+		pthread_mutex_unlock(&mutex);
 	}
 	return NULL;
 }
 void* gc(void* args){
 	while(1){
-		sem_wait(&connection);
+		pthread_mutex_lock(&mutex);
     	while (1){
     	    if(waiting == MIN || waiting == running) break;
     	    if((long)time(NULL) - end_time[waiting--] > 60){                                   // 현재 시간 받아서 비교
@@ -167,7 +177,7 @@ void* gc(void* args){
     	        break;
     	    }
     	}
-		sem_post(&connection);
+		pthread_mutex_unlock(&mutex);
 		sleep(10);    
 	}
 }
