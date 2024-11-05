@@ -66,7 +66,7 @@ int main(int argc, char *argv[]){
 		thread_id[i] = i;
 	}												    //thread MAX개 생성 준비
 	for (int i = 0; i < MIN; i++){
-		pthread_create(&pthread_list[i], NULL, get_message, (void*)thread_id + i);             // 최소 유지되는 쓰레드 생성
+		pthread_create(&pthread_list[i], NULL, get_message_thread, (void*)thread_id + i);             // 최소 유지되는 쓰레드 생성
         waiting++;
 	}
 	for (int i = MIN; i < MAX + 1; i++){                                                //생성할 수 있는 쓰레드 index 큐에 넣기
@@ -105,13 +105,11 @@ int main(int argc, char *argv[]){
 			continue;
 		}
         if(running == MAX){
-			if(send(clnt_sock, message1, sizeof(message2)-1, MSG_DONTWAIT ) == -1) error_handling("send error");;
-			if(send(clnt_sock, message2, sizeof(message2)-1, MSG_DONTWAIT ) == -1) error_handling("send error");
 			close(clnt_sock);
 		}else{
             if (running == waiting++){                                                     //대기중인 쓰레드 없으면 생성
 				pthread_id = popoleft(thread_que);
-                pthread_create(&pthread_list[pthread_id], NULL, get_message, (void*)thread_id + pthread_id);
+                pthread_create(&pthread_list[pthread_id], NULL, get_message_thread, (void*)thread_id + pthread_id);
             }
 			running++;
 			append(client_que, clnt_sock);												//clnt_sock 큐에 넣기
@@ -128,7 +126,7 @@ void error_handling(char *message){
 	fputs(message, stderr);
 	fputc('\n', stderr);
 }
-void* get_message(void* args){
+void* get_message_thread(void* args){
 	int pthread_id = *(int*) args;
     int str_len;
     int temp;
