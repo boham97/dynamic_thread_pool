@@ -14,48 +14,17 @@ int main() {
     const char *conninfo = "dbname=postgres user=postgres password=postgres host=127.0.0.1";
     PGconn *conn[2];
 
-    PGconn *conn2;
     PGresult *res;
-    {
 
-        // 데이터베이스 연결
-        conn2 = PQconnectdb(conninfo);
-
-        if (PQstatus(conn2) != CONNECTION_OK) {
-            fprintf(stderr, "Connection failed: %s\n", PQerrorMessage(conn2));
-            PQfinish(conn2);
-            exit(1);
-        }
-
-        // SQL 쿼리 실행
-        res = PQexec(conn2, "SELECT 1");
-
-        if (PQresultStatus(res) != PGRES_TUPLES_OK) {
-            fprintf(stderr, "Query failed: %s\n", PQerrorMessage(conn2));
-            PQclear(res);
-            PQfinish(conn2);
-            exit(1);
-        }
-
-        // 결과 출력
-        int nFields = PQnfields(res);
-        for (int i = 0; i < PQntuples(res); i++) {
-            for (int j = 0; j < nFields; j++) {
-                printf("%s ", PQgetvalue(res, i, j));
-            }
-            printf("\n");
-        }
-
-        // 메모리 해제
-        PQclear(res);
-        PQfinish(conn2);
-
-    }
 
     // 비동기 연결 시작
     conn[0] = PQconnectStart(conninfo);
     conn[1] = PQconnectStart(conninfo);
 
+    PQsendQuery(conn[0], "SELECT 1");
+    PQsendQuery(conn[1], "SELECT 1");
+    PQsetnonblocking(conn[0], 1);
+    PQsetnonblocking(conn[1], 1);
     // pollfd 구조체 설정
     fds[0].fd = PQsocket(conn[0]);
     fds[0].events = POLLIN;
