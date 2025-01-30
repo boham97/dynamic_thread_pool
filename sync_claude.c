@@ -33,7 +33,9 @@ int main() {
         check_conn_status(conns[i], i);
         printf("Connection %d established\n", i);
     }
-    
+    timespec_get(&ts, TIME_UTC); // 현재 시간(초, 나노초)를 구조체에 저장
+
+    printf("현재 시간: %ld초 %ld나노초\n", ts.tv_sec, ts.tv_nsec);
     // 각 연결에서 쿼리 실행
     for(int i = 0; i < NUM_CONNECTIONS; i++) {
         printf("\nExecuting query on connection %d\n", i);
