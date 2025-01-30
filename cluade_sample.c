@@ -3,11 +3,13 @@
 #include <poll.h>
 #include <libpq-fe.h>
 #include <string.h>
+#include <time.h>
 
-#define MAX_CONNS 3
+#define MAX_CONNS 30
 #define POLL_TIMEOUT 1000  // 1초
 
-typedef struct {
+typedef struct 
+{
     PGconn *conn;
     int finished_connect;
     int query_sent;
@@ -15,7 +17,8 @@ typedef struct {
     const char *conninfo;
 } DBConn;
 
-int handle_connection(DBConn *db) {
+int handle_connection(DBConn *db) 
+{
     PostgresPollingStatusType poll_status = PQconnectPoll(db->conn);
     
     switch (poll_status) 
@@ -49,7 +52,35 @@ void process_result(PGconn *conn) {
 }
 
 int main() {
-    DBConn dbs[MAX_CONNS] = {
+    DBConn dbs[MAX_CONNS] = 
+    {
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
+        {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
         {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
         {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"},
         {NULL, 0, 0, 0, "dbname=postgres user=postgres password=postgres host=127.0.0.1"}
@@ -57,6 +88,12 @@ int main() {
     
     struct pollfd fds[MAX_CONNS];
     
+    struct timespec ts;
+
+    timespec_get(&ts, TIME_UTC); // 현재 시간(초, 나노초)를 구조체에 저장
+
+    printf("현재 시간: %ld초 %ld나노초\n", ts.tv_sec, ts.tv_nsec);
+
     // 비동기 연결 시작
     for (int i = 0; i < MAX_CONNS; i++) 
     {
@@ -84,18 +121,21 @@ int main() {
     {
         // 모든 연결/쿼리가 완료되었는지 확인
         int all_done = 1;
-        for (int i = 0; i < MAX_CONNS; i++) {
+        for (int i = 0; i < MAX_CONNS; i++) 
+        {
             if (!dbs[i].conn) continue;
-            if (!dbs[i].query_finished) {
+            if (!dbs[i].query_finished) 
+            {
                 all_done = 0;
                 break;
             }
         }
         if (all_done) break;
-        printf("polled!\n");
+        //printf("polled!\n");
         // poll 호출
         int ready = poll(fds, MAX_CONNS, POLL_TIMEOUT);
-        if (ready < 0) {
+        if (ready < 0) 
+        {
             perror("poll failed");
             break;
         }
@@ -104,9 +144,9 @@ int main() {
         for (int i = 0; i < MAX_CONNS; i++) 
         {
             if (!dbs[i].conn) continue;
-            
             if (fds[i].revents & (POLLIN | POLLOUT)) 
             {
+                //printf("fds[%d].revents = %d\n", i, fds[i].revents);
                 // 연결 단계
                 if (!dbs[i].finished_connect) 
                 {
@@ -123,14 +163,6 @@ int main() {
                         fds[i].events = POLLIN;
                     }
                 }
-                // 쿼리 전송 단계
-                else if (!dbs[i].query_sent) {
-                    if (PQsendQuery(dbs[i].conn, "SELECT current_timestamp")) 
-                    {
-                        dbs[i].query_sent = 1;
-                        fds[i].events = POLLIN;  // 응답 대기로 변경
-                    }
-                }
                 // 결과 처리 단계
                 else if (!dbs[i].query_finished && (fds[i].revents & POLLIN)) {
                     if (PQconsumeInput(dbs[i].conn)) 
@@ -143,7 +175,16 @@ int main() {
                     }
                 }
             }
-            
+            // 쿼리 전송 단계
+            if (dbs[i].finished_connect && !dbs[i].query_sent) 
+            {
+                if (PQsendQuery(dbs[i].conn, "SELECT current_timestamp")) 
+                {
+                    //printf("PQsendQuery at %d\n", i);
+                    dbs[i].query_sent = 1;
+                    fds[i].events = POLLIN;  // 응답 대기로 변경
+                }
+            }
             // 에러 체크
             if (fds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
                 fprintf(stderr, "Poll error on connection %d\n", i);
@@ -153,9 +194,12 @@ int main() {
             }
         }
     }
-    
+    timespec_get(&ts, TIME_UTC); // 현재 시간(초, 나노초)를 구조체에 저장
+
+    printf("현재 시간: %ld초 %ld나노초\n", ts.tv_sec, ts.tv_nsec);
     // 정리
-    for (int i = 0; i < MAX_CONNS; i++) {
+    for (int i = 0; i < MAX_CONNS; i++) 
+    {
         if (dbs[i].conn) PQfinish(dbs[i].conn);
     }
     
