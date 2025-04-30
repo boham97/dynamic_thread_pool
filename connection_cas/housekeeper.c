@@ -216,6 +216,8 @@ unsigned int hash(unsigned long tid)
     return tid % MAX_HASH_SIZE;
 }
 
+//마지막 엔트리 CAS 획득 필요
+//d_flag 이면 넣기
 int hash_insert(hash_map *map, unsigned long tid, int value)
 {
     int index = hash(tid);
@@ -258,7 +260,8 @@ int hash_search(hash_map * map, unsigned long tid)
 {
     int index = hash(tid);
     entry_st *entry = map->bucket[index];
-    while (entry) {
+    while (entry) 
+    {
         if (tid == entry->key)
         {
             return entry->value;
@@ -269,18 +272,24 @@ int hash_search(hash_map * map, unsigned long tid)
 
 }
 
+
+//prev, entry cas 획득 -> GC 용
+//soft delete 하자
 int hash_delete(hash_map * map, unsigned long tid)
 {
     int index = hash(tid);
     entry_st *entry = map->bucket[index];
     entry_st *prev = NULL;
 
-    while (entry) {
+    while (entry) 
+    {
         if (tid == entry->key)
         {
-            if (prev) {
+            if (prev) 
+            {
                 prev->next = entry->next;
-            } else {
+            } else 
+            {
                 map->bucket[index] = entry->next;
             }
             free(entry);
