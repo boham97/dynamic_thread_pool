@@ -34,6 +34,7 @@ typedef struct entry_st
     unsigned long key;
     int value;
     int read_cas;
+    int delete_flag;
     struct entry_st *next;
 } entry_st;
 
@@ -69,7 +70,7 @@ void queue_destroy(wait_que *q);
 int enque(wait_que *q);
 int deque(wait_que *q);
 
-unsigned int hash(pthread_t tid);
+unsigned int hash(unsigned long tid);
 void hash_init(hash_map *map);
 void hash_free(hash_map *map);
 int hash_insert(hash_map * map, unsigned long tid, int value);
@@ -230,9 +231,10 @@ int hash_insert(hash_map *map, unsigned long tid, int value)
     new_entry->read_cas = FALSE;
     new_entry->value = value;
     new_entry->next = NULL;
+    new_entry->delete_flag = FALSE;
     
     entry_st *entry = map->bucket[index];
-
+    // cas 어디에 ?
     if (entry == NULL)
     {
         map->bucket[index] = new_entry;
@@ -241,19 +243,23 @@ int hash_insert(hash_map *map, unsigned long tid, int value)
 
     while(entry)
     {
-        if(entry->key == new_entry->key)
+        if(entry->key == new_entry->key && !entry->delete_flag && __sync_bool_compare_and_swap(&entry->read_cas,  FALSE, TRUE))
         {
             entry->value = value;
             free(new_entry);
+            entry->read_cas = FALSE;
             return SUCCESS;
         }
-        else if (entry->next == NULL)
+        else if (entry->next == NULL && __sync_bool_compare_and_swap(&entry->read_cas,  FALSE, TRUE))
         {
             entry->next = new_entry;
+            entry->read_cas = FALSE;
             return SUCCESS;
         }
     
     }
+
+    return FAIL;
 }
 
 int hash_search(hash_map * map, unsigned long tid)
@@ -285,18 +291,47 @@ int hash_delete(hash_map * map, unsigned long tid)
     {
         if (tid == entry->key)
         {
+            while (!__sync_bool_compare_and_swap(&entry->read_cas, FALSE, TRUE));
+            while (prev && !__sync_bool_compare_and_swap(&prev->read_cas, FALSE, TRUE))
             if (prev) 
             {
                 prev->next = entry->next;
-            } else 
+            }
+            else 
             {
                 map->bucket[index] = entry->next;
             }
             free(entry);
-            return SUCCESS;
+            if(prev)
+                prev->read_cas = FALSE;
+        
+            entry = entry->next;
         }
         prev = entry;
         entry = entry->next;
     }
     return FAIL;  // 키를 찾지 못한 경우
 }
+
+int hash_delete_soft(hash_map * map, unsigned long tid)
+{
+    int index = hash(tid);
+    entry_st *entry = map->bucket[index];
+
+    while (entry) 
+    {
+        if (tid == entry->key)
+        {
+            while (!__sync_bool_compare_and_swap(&entry->read_cas, FALSE, TRUE));
+
+            entry->delete_flag = TRUE;
+            entry->read_cas = FALSE;
+
+            return SUCCESS;
+        }
+        entry = entry->next;
+    }
+    return FAIL;  // 키를 찾지 못한 경우
+}
+
+
