@@ -74,12 +74,16 @@ unsigned int hash(unsigned long tid);
 void hash_init(hash_map *map);
 void hash_free(hash_map *map);
 int hash_insert(hash_map * map, unsigned long tid, int value);
-int hash_search(hash_map * map, unsigned long tid);
-int hash_delete(hash_map * map, unsigned long tid);
+int hash_get(hash_map * map, unsigned long tid);
+int hash_delete(hash_map * map, int index);
+int hash_delete_soft(hash_map * map, unsigned long tid);
 
 void* thread_func(void* arg);
 void que_test();
 void hash_test();
+
+int get_lock(entry_st *entry);
+int release_lock(entry_st *entry);
 
 wait_que g_que;
 
@@ -198,16 +202,16 @@ void hash_test()
 {
     hash_init(&map);
     hash_insert(&map, 1UL, 1);
-    assert(hash_search(&map, 1UL) == 1);
+    assert(hash_get(&map, 1UL) == 1);
 
     hash_insert(&map, 1UL, 2);
-    assert(hash_search(&map, 1UL) == 2);
+    assert(hash_get(&map, 1UL) == 2);
 
-    hash_delete(&map, 1UL);
-    assert(hash_search(&map, 1UL) == FAIL);
+    hash_delete_soft(&map, 1UL);
+    assert(hash_get(&map, 1UL) == FAIL);
 
     hash_insert(&map, 2UL, 3);
-    assert(hash_search(&map, 2UL) == 3);
+    assert(hash_get(&map, 2UL) == 3);
     printf("hash test finish!\n");
 }
 
@@ -262,13 +266,13 @@ int hash_insert(hash_map *map, unsigned long tid, int value)
     return FAIL;
 }
 
-int hash_search(hash_map * map, unsigned long tid)
+int hash_get(hash_map * map, unsigned long tid)
 {
     int index = hash(tid);
     entry_st *entry = map->bucket[index];
     while (entry) 
     {
-        if (tid == entry->key)
+        if (tid == entry->key && !entry->delete_flag)
         {
             return entry->value;
         }
@@ -280,31 +284,30 @@ int hash_search(hash_map * map, unsigned long tid)
 
 
 //prev, entry cas 획득 -> GC 용
-//soft delete 하자
-int hash_delete(hash_map * map, unsigned long tid)
+int hash_delete(hash_map * map, int index)
 {
-    int index = hash(tid);
     entry_st *entry = map->bucket[index];
     entry_st *prev = NULL;
 
     while (entry) 
     {
-        if (tid == entry->key)
+        if (entry->delete_flag)
         {
-            while (!__sync_bool_compare_and_swap(&entry->read_cas, FALSE, TRUE));
-            while (prev && !__sync_bool_compare_and_swap(&prev->read_cas, FALSE, TRUE))
+            get_lock(entry);
+            
             if (prev) 
             {
+                get_lock(prev);
                 prev->next = entry->next;
+                release_lock(prev);
             }
             else 
             {
                 map->bucket[index] = entry->next;
             }
             free(entry);
-            if(prev)
-                prev->read_cas = FALSE;
-        
+            //release_lock(entry);
+
             entry = entry->next;
         }
         prev = entry;
@@ -322,10 +325,10 @@ int hash_delete_soft(hash_map * map, unsigned long tid)
     {
         if (tid == entry->key)
         {
-            while (!__sync_bool_compare_and_swap(&entry->read_cas, FALSE, TRUE));
+            get_lock(entry);
 
             entry->delete_flag = TRUE;
-            entry->read_cas = FALSE;
+            release_lock(entry)
 
             return SUCCESS;
         }
@@ -335,3 +338,12 @@ int hash_delete_soft(hash_map * map, unsigned long tid)
 }
 
 
+int get_lock(entry_st *entry)
+{
+    while (!__sync_bool_compare_and_swap(&entry->read_cas, FALSE, TRUE));
+    return SUCCESS;
+}
+int release_lock(entry_st *entry)
+{
+    entry.read_cas = FALSE;
+}
