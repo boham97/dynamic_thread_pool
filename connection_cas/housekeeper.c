@@ -51,9 +51,10 @@ typedef struct
     GET은 락 없어야하는데 읽을때 수정한다면? -> RCU? hazard 뭐 어쨰?
     읽을떄도 락 없이 읽을수 있어야한다
     일단은 스레드 세이프 하지 않게 만들고 생각해보자
+    250507완료료
 
-    버킷 단위로 mutex 락 추가?
-    엔트리 단위로 cas
+    버킷 단위로 락 추가? -> GC 돌떄 편함
+    엔트리 단위로 cas -> 캐시 지역성 고려해봐야함
     삭제는 소프트하게 하고 나중에 락 획득 후 GC 
 */
 
@@ -82,8 +83,8 @@ void* thread_func(void* arg);
 void que_test();
 void hash_test();
 
-int get_lock(entry_st *entry);
-int release_lock(entry_st *entry);
+int get_lock(hash_map *map, int index);
+int release_lock(hash_map *map, int index);
 
 wait_que g_que;
 
@@ -284,66 +285,64 @@ int hash_get(hash_map * map, unsigned long tid)
 
 
 //prev, entry cas 획득 -> GC 용
-int hash_delete(hash_map * map, int index)
+int hash_delete(hash_map *map, int index)
 {
     entry_st *entry = map->bucket[index];
     entry_st *prev = NULL;
-
+    get_lock(map, index);
     while (entry) 
     {
         if (entry->delete_flag)
         {
-            get_lock(entry);
             
             if (prev) 
             {
-                get_lock(prev);
                 prev->next = entry->next;
-                release_lock(prev);
             }
             else 
             {
                 map->bucket[index] = entry->next;
             }
             free(entry);
-            //release_lock(entry);
 
             entry = entry->next;
         }
         prev = entry;
         entry = entry->next;
     }
-    return FAIL;  // 키를 찾지 못한 경우
+    release_lock(map, index);
+    return SUCCESS; 
 }
 
-int hash_delete_soft(hash_map * map, unsigned long tid)
+int hash_delete_soft(hash_map *map, unsigned long tid)
 {
     int index = hash(tid);
     entry_st *entry = map->bucket[index];
 
+    get_lock(map, index);
     while (entry) 
     {
         if (tid == entry->key)
         {
-            get_lock(entry);
 
             entry->delete_flag = TRUE;
-            release_lock(entry)
-
+            release_lock(map, index);
             return SUCCESS;
         }
         entry = entry->next;
     }
+    release_lock(map, index);
     return FAIL;  // 키를 찾지 못한 경우
 }
 
 
-int get_lock(entry_st *entry)
+int get_lock(hash_map *map, int index)
 {
-    while (!__sync_bool_compare_and_swap(&entry->read_cas, FALSE, TRUE));
+    while (!__sync_bool_compare_and_swap(&map->bucket_use[index], FALSE, TRUE));
     return SUCCESS;
 }
-int release_lock(entry_st *entry)
+int release_lock(hash_map *map, int index)
 {
-    entry.read_cas = FALSE;
+    map->bucket_use[index] = FALSE;
+    return SUCCESS;
 }
