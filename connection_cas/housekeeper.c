@@ -33,7 +33,6 @@ typedef struct entry_st
 {
     unsigned long key;
     int value;
-    int read_cas;
     int delete_flag;
     struct entry_st *next;
 } entry_st;
@@ -56,6 +55,23 @@ typedef struct
     버킷 단위로 락 추가? -> GC 돌떄 편함
     엔트리 단위로 cas -> 캐시 지역성 고려해봐야함
     삭제는 소프트하게 하고 나중에 락 획득 후 GC 
+*/
+
+
+
+/*
+    읽기와 논리적 삭제에 락 없이 하는법
+    삭제 시 CAS로 다른쓰레드에서도 해당 변경값 읽을 수있도록 함
+
+    물리적 삭제시 read 에 락이 없으면 할당 해제시  겹칠수 있음
+    따라서 바로 삭제할수 없음
+    
+    버킷 수만큼 연결 리스트로 된 queue을 삭제할 엔트리 저장용으로 만듬듬 
+    엔트리에 삭제용 큐잉 할수 있는 주소 추가
+    GC를 돌면 이전 엔트리에서 현재 엔트리의 넥스트 엔트릐의 주소로 변경후 
+    큐에 삭제 대상 엔트리 삭입
+    이러면 이제 삭제 엔트리에 진입 할수 없음
+    충분한 시간이 지나면 락 없이 큐를 읽으면서 전부 삭제
 */
 
 typedef struct 
@@ -233,36 +249,36 @@ int hash_insert(hash_map *map, unsigned long tid, int value)
     if (! new_entry)return FAIL;
 
     new_entry->key = tid;
-    new_entry->read_cas = FALSE;
     new_entry->value = value;
     new_entry->next = NULL;
     new_entry->delete_flag = FALSE;
     
+    get_lock(map, index);
     entry_st *entry = map->bucket[index];
-    // cas 어디에 ?
     if (entry == NULL)
     {
         map->bucket[index] = new_entry;
+        release_lock(map, index);
         return SUCCESS;
     }
 
     while(entry)
     {
-        if(entry->key == new_entry->key && !entry->delete_flag && __sync_bool_compare_and_swap(&entry->read_cas,  FALSE, TRUE))
+        if(entry->key == new_entry->key && !entry->delete_flag )
         {
             entry->value = value;
             free(new_entry);
-            entry->read_cas = FALSE;
+            release_lock(map, index);
             return SUCCESS;
         }
-        else if (entry->next == NULL && __sync_bool_compare_and_swap(&entry->read_cas,  FALSE, TRUE))
+        else if (entry->next == NULL)
         {
             entry->next = new_entry;
-            entry->read_cas = FALSE;
+            release_lock(map, index);
             return SUCCESS;
         }
-    
     }
+    release_lock(map, index);
 
     return FAIL;
 }
@@ -319,19 +335,16 @@ int hash_delete_soft(hash_map *map, unsigned long tid)
     int index = hash(tid);
     entry_st *entry = map->bucket[index];
 
-    get_lock(map, index);
     while (entry) 
     {
         if (tid == entry->key)
         {
-
-            entry->delete_flag = TRUE;
-            release_lock(map, index);
+            //메모리 가시성
+            __sync_bool_compare_and_swap(&entry->delete_flag, FALSE, TRUE);
             return SUCCESS;
         }
         entry = entry->next;
     }
-    release_lock(map, index);
     return FAIL;  // 키를 찾지 못한 경우
 }
 
