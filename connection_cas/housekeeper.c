@@ -35,12 +35,15 @@ typedef struct entry_st
     int value;
     int delete_flag;
     struct entry_st *next;
+    struct entry_st *next_trash;
 } entry_st;
 
 typedef struct 
 {
     entry_st *bucket[MAX_HASH_SIZE];
     bool bucket_use[MAX_HASH_SIZE];
+    entry_st *que_start;
+    entry_st *que_end;
 }hash_map;
 
 /*
@@ -102,6 +105,8 @@ void hash_test();
 int get_lock(hash_map *map, int index);
 int release_lock(hash_map *map, int index);
 
+void insert_trash(hash_map *map, entry_st *entry);
+void clean_trash(hash_map *map);
 wait_que g_que;
 
 int main()
@@ -181,12 +186,15 @@ void hash_init(hash_map *map)
         map->bucket[i] = NULL;
         map->bucket_use[i] = FALSE;
     }
+    mpa->que_start = NULL;
+    mpa->que_end = NULL;
 }
 
 wait_que g_que;
 hash_map map;
 
-void* thread_func(void* arg) {
+void* thread_func(void* arg) 
+{
     printf("enque\n");
     enque(&g_que);
     return NULL;
@@ -301,32 +309,43 @@ int hash_get(hash_map * map, unsigned long tid)
 
 
 //prev, entry cas 획득 -> GC 용
-int hash_delete(hash_map *map, int index)
+int hash_delete(hash_map *map)
 {
-    entry_st *entry = map->bucket[index];
+    entry_st *entry = NULL;
     entry_st *prev = NULL;
-    get_lock(map, index);
-    while (entry) 
-    {
-        if (entry->delete_flag)
-        {
-            
-            if (prev) 
-            {
-                prev->next = entry->next;
-            }
-            else 
-            {
-                map->bucket[index] = entry->next;
-            }
-            free(entry);
+    int index = 0;
 
+    for (i = 0; i < MAX_HASH_SIZE; i++)
+    {
+
+        
+        entry_st *entry = map->bucket[index];
+        get_lock(map, index);
+        while (entry) 
+        {
+            if (entry->delete_flag)
+            {
+                
+                if (prev) 
+                {
+                    prev->next = entry->next;
+                }
+                else 
+                {
+                    map->bucket[index] = entry->next;
+                }
+                insert_trash(map, entry);
+                //free(entry); 읽고 있을수 있음!
+                
+                entry = entry->next;
+            }
+            prev = entry;
             entry = entry->next;
         }
-        prev = entry;
-        entry = entry->next;
+        release_lock(map, index);
     }
-    release_lock(map, index);
+    sleep(1);
+    clean_trash(map);
     return SUCCESS; 
 }
 
@@ -358,4 +377,30 @@ int release_lock(hash_map *map, int index)
 {
     map->bucket_use[index] = FALSE;
     return SUCCESS;
+}
+
+void insert_trash(hash_map *map, entry_st *entry)
+{
+    entry_st *last_entrty = NULL;
+    if(!map->que_start)
+    {
+        map->que_start = entry;
+        map->que_end = entry;
+    }
+    else
+    {
+        last_entrty = map->que_end;
+        last_entrty->next_trash = entry;
+        map->que_end = entry;
+    }
+}
+void clean_trash(hash_map *map)
+{
+    entry_st *entry = map->que_start;
+    entry_st *next = NULL;
+    while(entry)
+    {
+        next = entry->new_entry;
+        free(entry);
+    }
 }
