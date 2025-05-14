@@ -108,7 +108,7 @@ void hash_test();
 
 int get_lock(hash_map *map, int index);
 int release_lock(hash_map *map, int index);
-
+int hash_get_all(hash_map *map);
 void insert_trash(hash_map *map, entry_st *entry);
 void clean_trash(hash_map *map);
 wait_que g_que;
@@ -245,7 +245,12 @@ void hash_test()
     hash_insert(&map, 2UL, 3);
     assert(hash_get(&map, 2UL) == 3);
 
+    hash_delete_soft(&map, 2UL);
+    hash_get_all(&map);
+    
     hash_delete(&map);
+    assert(hash_get(&map, 1UL) == 1);
+    assert(hash_get(&map, 2UL) == FAIL);
     printf("hash test finish!\n");
 }
 
@@ -270,12 +275,14 @@ int hash_insert(hash_map *map, unsigned long tid, int value)
     new_entry->next = NULL;
     new_entry->delete_flag = FALSE;
     
+    printf("hash_insert: %d %lu\n", index, tid);
     get_lock(map, index);
     entry_st *entry = map->bucket[index];
     if (entry == NULL)
     {
         map->bucket[index] = new_entry;
         release_lock(map, index);
+        printf("hash_insert 1\n");
         return SUCCESS;
     }
 
@@ -284,14 +291,17 @@ int hash_insert(hash_map *map, unsigned long tid, int value)
         if(entry->key == new_entry->key && !entry->delete_flag )
         {
             entry->value = value;
+            entry->delete_flag = FALSE;
             free(new_entry);
             release_lock(map, index);
+            printf("hash_insert 2\n");
             return SUCCESS;
         }
         else if (entry->next == NULL)
         {
-            entry->next = new_entry;
+            entry->next = new_entry;    
             release_lock(map, index);
+            printf("hash_insert 3\n");
             return SUCCESS;
         }
     }
@@ -317,6 +327,29 @@ int hash_get(hash_map * map, unsigned long tid)
 }
 
 
+int hash_get_all(hash_map *map)
+{
+    entry_st *entry = NULL;
+    int index = 0;
+    int i = 0;
+    for (i = 0; i < MAX_HASH_SIZE; i++)
+    {
+
+        
+        get_lock(map, i);
+        entry_st *entry = map->bucket[i];
+        while (entry) 
+        {
+            printf("hash_get_all: %lu %d %d\n", entry->key, entry->value, entry->delete_flag);
+            entry = entry->next;
+        }
+        release_lock(map, i);
+    }
+    sleep(1);
+    clean_trash(map);
+    return SUCCESS; 
+}
+
 //prev, entry cas 획득 -> GC 용
 int hash_delete(hash_map *map)
 {
@@ -328,12 +361,13 @@ int hash_delete(hash_map *map)
     {
 
         
-        entry_st *entry = map->bucket[index];
-        get_lock(map, index);
+        get_lock(map, i);
+        entry_st *entry = map->bucket[i];
         while (entry) 
         {
             if (entry->delete_flag)
             {
+                printf("hash_delete %d: %lu %d\n", i, entry->key, entry->value);
                 
                 if (prev) 
                 {
@@ -341,17 +375,21 @@ int hash_delete(hash_map *map)
                 }
                 else 
                 {
-                    map->bucket[index] = entry->next;
+                    map->bucket[i] = entry->next;
                 }
                 insert_trash(map, entry);
                 //free(entry); 읽고 있을수 있음!
                 
                 entry = entry->next;
             }
-            prev = entry;
-            entry = entry->next;
+            else
+            {
+
+                prev = entry;
+                entry = entry->next;
+            }
         }
-        release_lock(map, index);
+        release_lock(map, i);
     }
     sleep(1);
     clean_trash(map);
@@ -391,25 +429,29 @@ int release_lock(hash_map *map, int index)
 void insert_trash(hash_map *map, entry_st *entry)
 {
     entry_st *last_entrty = NULL;
-    if(!map->que_start)
-    {
-        map->que_start = entry;
-        map->que_end = entry;
-    }
-    else
+    if(map->que_start)
     {
         last_entrty = map->que_end;
         last_entrty->next_trash = entry;
         map->que_end = entry;
     }
+    else
+    {
+        map->que_start = entry;
+        map->que_end = entry;
+    }
+    printf("insert_trash: end\n");
 }
 void clean_trash(hash_map *map)
 {
     entry_st *entry = map->que_start;
     entry_st *next = NULL;
+    printf("started\n");
     while(entry)
     {
+        printf("clean_trash: %lu %d\n", entry->key, entry->value);
         next = entry->next_trash;
         free(entry);
+        entry = next;
     }
 }
