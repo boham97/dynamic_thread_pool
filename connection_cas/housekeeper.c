@@ -83,6 +83,7 @@ typedef struct
     PGconn *conn_list[CONN_SIZE];
     hash_map map;
     wait_que que;
+    char connect_info[1024];
 } conn_pool;
 
 
@@ -98,6 +99,8 @@ int hash_insert(hash_map * map, unsigned long tid, int value);
 int hash_get(hash_map * map, unsigned long tid);
 int hash_delete(hash_map * map);
 int hash_delete_soft(hash_map * map, unsigned long tid);
+void clean_trash(hash_map *map);
+
 
 void* thread_func(void* arg);
 void que_test();
@@ -236,8 +239,13 @@ void hash_test()
     hash_delete_soft(&map, 1UL);
     assert(hash_get(&map, 1UL) == FAIL);
 
+    hash_insert(&map, 1UL, 1);
+    assert(hash_get(&map, 1UL) == 1);
+
     hash_insert(&map, 2UL, 3);
     assert(hash_get(&map, 2UL) == 3);
+
+    hash_delete(&map);
     printf("hash test finish!\n");
 }
 
