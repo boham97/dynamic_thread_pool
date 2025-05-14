@@ -5,6 +5,8 @@
 #include <assert.h> // test code
 #include <unistd.h> // sleep 함수용
 
+#include <libpq-fe.h>
+
 #define MAX_HASH_SIZE   256
 #define MAX_QUE_SIZE     10
 #define CONN_SIZE        10
@@ -16,7 +18,6 @@
 
 typedef int             bool;
 
-typedef int             pg_conn;
 
 
 typedef struct 
@@ -79,7 +80,7 @@ typedef struct
 
 typedef struct 
 {
-    pg_conn conn_list[CONN_SIZE];
+    PGconn *conn_list[CONN_SIZE];
     hash_map map;
     wait_que que;
 } conn_pool;
@@ -95,7 +96,7 @@ void hash_init(hash_map *map);
 void hash_free(hash_map *map);
 int hash_insert(hash_map * map, unsigned long tid, int value);
 int hash_get(hash_map * map, unsigned long tid);
-int hash_delete(hash_map * map, int index);
+int hash_delete(hash_map * map);
 int hash_delete_soft(hash_map * map, unsigned long tid);
 
 void* thread_func(void* arg);
@@ -186,8 +187,8 @@ void hash_init(hash_map *map)
         map->bucket[i] = NULL;
         map->bucket_use[i] = FALSE;
     }
-    mpa->que_start = NULL;
-    mpa->que_end = NULL;
+    map->que_start = NULL;
+    map->que_end = NULL;
 }
 
 wait_que g_que;
@@ -314,7 +315,7 @@ int hash_delete(hash_map *map)
     entry_st *entry = NULL;
     entry_st *prev = NULL;
     int index = 0;
-
+    int i = 0;
     for (i = 0; i < MAX_HASH_SIZE; i++)
     {
 
@@ -400,7 +401,7 @@ void clean_trash(hash_map *map)
     entry_st *next = NULL;
     while(entry)
     {
-        next = entry->new_entry;
+        next = entry->next_trash;
         free(entry);
     }
 }
