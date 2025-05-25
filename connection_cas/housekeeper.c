@@ -18,7 +18,23 @@
 
 typedef int             bool;
 
+//원자성을 보장하는 연산 분기를 줄이기위해
+//UNAVAILABLE이면 내부에서 체크용 flag
+enum conn_flag
+{
+    NONE = 0,
+    IN_USING,
+    BROKEN,
+    CHECKING,
+    CLOSE
+};
 
+//원자성 연산을 위해 사용 가능 불가능으로만 일단 체크후 불가능으로 바꾸고 체크
+enum state_flag
+{
+    CONN_AVAILABLE = 0,
+    CONN_UNAVAILABLE
+}
 
 typedef struct 
 {
@@ -47,6 +63,8 @@ typedef struct
     entry_st *que_end;
 }hash_map;
 
+
+
 /*
     락 범위 엔트리 단위 vs 버킷 단위
     버킷 단위로 해야 삭제힐떼 편함
@@ -60,9 +78,9 @@ typedef struct
     엔트리 단위로 cas -> 캐시 지역성 고려해봐야함
     삭제는 소프트하게 하고 나중에 락 획득 후 GC 
 */
+`
 
-
-
+`
 /*
     읽기와 논리적 삭제에 락 없이 하는법
     삭제 시 CAS로 다른쓰레드에서도 해당 변경값 읽을 수있도록 함
@@ -81,8 +99,10 @@ typedef struct
 typedef struct 
 {
     PGconn *conn_list[CONN_SIZE];
-    hash_map map;
-    wait_que que;
+    int state[CONN_SIZE];
+    int flag[CONN_SIZE];
+    hash_map *map;
+    wait_que *que;
     char connect_info[1024];
 } conn_pool;
 
@@ -111,6 +131,9 @@ int release_lock(hash_map *map, int index);
 int hash_get_all(hash_map *map);
 void insert_trash(hash_map *map, entry_st *entry);
 void clean_trash(hash_map *map);
+
+PGconn *get_conn(conn_pool *pool);
+
 wait_que g_que;
 
 int main()
@@ -453,5 +476,26 @@ void clean_trash(hash_map *map)
         next = entry->next_trash;
         free(entry);
         entry = next;
+    }
+}
+
+PGconn *get_conn(conn_pool *pool)
+{
+    int i = 0;
+    int index = -1;
+    unsigned long tid = (unsigned long)pthread_self();
+    index = hash_get(pool->map, tid);
+    if(index != -1 && __sync_bool_compare_and_swap(&pool->state[index], CONN_AVAILABLE, CONN_UNAVAILABLE))
+    {
+        continue;
+    }
+    else
+    {
+        for(i = 0; i < CONN_SIZE; i++)
+        {
+            if(!__sync_bool_compare_and_swap(&pool->flag[i], CONN_AVAILABLE, CONN_UNAVAILABLE))
+                continue;
+            
+        }
     }
 }
