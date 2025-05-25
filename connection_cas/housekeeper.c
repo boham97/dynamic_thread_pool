@@ -96,6 +96,11 @@ typedef struct
     충분한 시간이 지나면 락 없이 큐를 읽으면서 전부 삭제
 */
 
+/*
+    쓰레드 tid를 키로 해시맵으로 관리하는건 엔트리가 너무 많이 질수 있음
+    pthread_getspecific()으로 쓰레드 내부에서 캐싱 하는게 더 빠름
+    결과값이 쓰고 있으면 풀 체킹 (slow path)
+*/
 typedef struct 
 {
     PGconn *conn_list[CONN_SIZE];
