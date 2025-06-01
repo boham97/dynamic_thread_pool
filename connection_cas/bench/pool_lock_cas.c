@@ -80,18 +80,11 @@ int get_conn()
 
 int get_conn_cas() 
 {
-    int batch_size = 8;
-    for (int batch = 0; batch < (POOL_CNT + batch_size - 1) / batch_size; batch++) 
+    for (int i = 0; i < POOL_CNT; i++) 
     {
-        int start = batch * batch_size;
-        int end = (start + batch_size > POOL_CNT) ? POOL_CNT : start + batch_size;
-        
-        for (int i = start; i < end; i++) 
+        if(__sync_bool_compare_and_swap(&conn_cas_status[i].value, 0, 1)) 
         {
-            if(__sync_bool_compare_and_swap(&conn_cas_status[i].value, 0, 1)) 
-            {
-                return i;
-            }
+            return i;
         }
     }
     return -1;
