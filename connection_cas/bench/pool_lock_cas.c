@@ -4,10 +4,12 @@
 #include <unistd.h>
 #include <sys/time.h>
 
-#define THREAD_CNT 80
-#define POOL_CNT 100
+#define THREAD_CNT 50
+#define POOL_CNT 25
 #define TRY 100000
 #define SLEEP 30000
+
+pthread_key_t key;
 
 struct aligned_int {
     volatile int value;
@@ -16,7 +18,8 @@ struct aligned_int {
 
 
 int get_conn();
-int get_conn_cas();
+int get_conn_long();
+int get_conn_short();
 
 void return_conn(int index);
 void return_conn_cas(int index);
@@ -31,32 +34,53 @@ struct aligned_int conn_cas_status[POOL_CNT];
 
 void *worker_lock(void *arg) 
 {
+    int get = 0;
     int res = 0;
-    for (int i = 0; i < TRY; i++) {
-        res = get_conn();
-        if (res != -1)
+    for (int i = 0; i < TRY; i++) 
+    { 
+        while(1)
         {
-            //usleep(SLEEP);
-            return_conn(res);
+            get++;
+            res = get_conn();
+            if (res != -1)
+            {
+                //usleep(SLEEP);
+                return_conn(res);
+                break;
+            }
         }
 
     }
+    printf("%d\n", get);
     return NULL;
 }
 
 void *worker_cas(void *arg) 
 {
     int res = 0;
-    for (int i = 0; i < TRY; i++) {
-        res = get_conn_cas();
-
-        if (res != -1)
+    int get = 0;
+    int cash = 0;
+    for (int i = 0; i < TRY; i++) 
+    {
+        while(1)
         {
-            //usleep(SLEEP);
-            return_conn_cas(res);
+            get++;
+            if((res = get_conn_short()) != -1)
+            {
+                cash++;
+                return_conn_cas(res);
+                break;
+            }
+            else if((res = get_conn_long())!= -1)
+            //if((res = get_conn_long())!= -1)
+            {
+                return_conn_cas(res);
+                break;
+            }
         }
 
     }
+    printf("%d %d\n", get, cash);
     return NULL;
 }
 
@@ -78,13 +102,29 @@ int get_conn()
     return res;
 }
 
-int get_conn_cas() 
+int get_conn_long() 
 {
     for (int i = 0; i < POOL_CNT; i++) 
     {
         if(__sync_bool_compare_and_swap(&conn_cas_status[i].value, 0, 1)) 
         {
+            pthread_setspecific(key, (void *)(intptr_t)i);
             return i;
+        }
+    }
+    return -1;
+}
+
+int get_conn_short() 
+{
+    void *ptr = pthread_getspecific(key);
+    if(ptr)
+    {
+        int index = (int)(intptr_t)ptr;
+        if(__sync_bool_compare_and_swap(&conn_cas_status[index].value, 0, 1)) 
+        {
+            pthread_setspecific(key, (void *)(intptr_t)index);
+            return index;
         }
     }
     return -1;
@@ -107,6 +147,7 @@ void return_conn_cas(int i)
 
 int main() 
 {
+    pthread_key_create(&key, NULL);
     struct timeval start, end;
     long elapsed;
     pthread_t thread_lock[THREAD_CNT];
@@ -156,6 +197,7 @@ int main()
     printf("CAS 실행 시간: %ld 마이크로초 (%.3f초)\n", elapsed, elapsed / 1000000.0);
 
     pthread_mutex_destroy(&lock); // 뮤텍스 제거
+    pthread_key_delete(key);
     return 0;
 }
 
