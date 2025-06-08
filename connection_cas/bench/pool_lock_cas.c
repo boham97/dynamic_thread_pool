@@ -25,7 +25,7 @@ pthread_key_t key;
 volatile int conn_cnt = POOL_MIN_CNT;
 struct aligned_int {
     int value;
-    long created; //커넥션 생성 시간 -> 오래 돠면 정리후 재 연결
+    long updated; //커넥션 생성 시간 -> 오래 돠면 정리후 재 연결
     enum conn_flag flag; //점유 상황
     char padding[52]; // 64바이트 정렬
 } __attribute__((aligned(64)));
@@ -43,9 +43,11 @@ pthread_mutex_t lock; // 전역 뮤텍스
 
 int conn_lock_status[POOL_MAX_CNT] = {0,};
 struct aligned_int conn_cas_status[POOL_MAX_CNT];
+volatile long now = 0;
 
 void *house_keeper(void *arg)
 {
+    //1초 마다 ㅜㅐㅈ업데이트
     int i = 0;
     int conn_count = 0;
     for (int i = 0; i < conn_cnt; i++) 
@@ -167,10 +169,10 @@ int add_conn()
     for(i = POOL_MIN_CNT; i < POOL_MAX_CNT; i++)
     {
         //대충 커넥션 만드는 로직 
-        if(__sync_bool_compare_and_swap(&conn_cas_status[i].value, 1, 1))
+        if(__sync_bool_compare_and_swap(&conn_cas_status[i].flag, CLOSED, IN_USING))
         {
-            //커넥션 할당
-            conn_cas_status[i].flag = IN_USING;
+            //언제 할당했는지 정보 필요
+            conn_cas_status[i].updated = time(NULL);
             return i;
         }
     }
@@ -189,13 +191,16 @@ void return_conn(int i)
 
 void return_conn_cas(int i)
 {
-    __sync_bool_compare_and_swap(&conn_cas_status[i].value, 1, 0);
     conn_cas_status[i].flag = NONE;
+    //conn_cas_status[i].updated = time(NULL);  -> 자원 많이 
+    __sync_bool_compare_and_swap(&conn_cas_status[i].value, 1, 0);
 }
 
 void conn_check(int i)
 {
-    //1. 오래된 커넥션 끊고 
+    //1. 아이들 오래된 커넥션 끊고 재연결 
+    //2. 끊어졌으면 새로 연결
+    //3. 커넥션수 체크후 1분동안 안썼으면 컨 줄이기 -> 
 }
 
 int main() 
@@ -233,6 +238,7 @@ int main()
     for(i = POOL_MIN_CNT; i < POOL_MAX_CNT; i++)
     {
         conn_cas_status[i].value = 1;
+        conn_cas_status[i].flag = CLOSED;
     }
 
     gettimeofday(&start, NULL);
