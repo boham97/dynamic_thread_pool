@@ -4,9 +4,9 @@
 #include <unistd.h>
 #include <sys/time.h>
 
-#define THREAD_CNT 25
+#define THREAD_CNT 40
 #define POOL_MIN_CNT 20
-#define POOL_MAX_CNT 100
+#define POOL_MAX_CNT 20
 #define TRY 100000
 #define SLEEP 30000
 
@@ -14,48 +14,50 @@
 //점유 플래그
 enum conn_flag
 {
-    NONE = 0,
-    IN_USING,
-    CHECKING,
+    IN_USING = 0,
+    //CHECKING, 하우스 키퍼는 한개이므로 
     CLOSED
 };
 
 
 pthread_key_t key;
-volatile int conn_cnt = POOL_MIN_CNT;
-struct aligned_int {
+struct aligned_int 
+{
     int value;
-    long updated; //커넥션 생성 시간 -> 오래 돠면 정리후 재 연결
-    enum conn_flag flag; //점유 상황
-    char padding[52]; // 64바이트 정렬
+    long updated;                   //커넥션 생성 시간 -> 오래 돠면 정리후 재 연결
+    enum conn_flag flag;            //점유 상황
+    char padding[52];               // 64바이트 정렬
 } __attribute__((aligned(64)));
 
 int add_conn();
 int get_conn();
 int get_conn_long();
 int get_conn_short();
+int is_valid(int i);
 
 void return_conn(int index);
 void return_conn_cas(int index);
 void conn_check(int i);
-pthread_mutex_t lock; // 전역 뮤텍스
-
+pthread_mutex_t lock;               // 전역 뮤텍스
 
 int conn_lock_status[POOL_MAX_CNT] = {0,};
 struct aligned_int conn_cas_status[POOL_MAX_CNT];
+long conn_add_time[POOL_MAX_CNT] = {0,};
+
 volatile long now = 0;
 
 void *house_keeper(void *arg)
 {
-    //1초 마다 ㅜㅐㅈ업데이트
     int i = 0;
     int conn_count = 0;
-    for (int i = 0; i < conn_cnt; i++) 
+    while(1)
     {
-        if(__sync_bool_compare_and_swap(&conn_cas_status[i].value, 0, 1)) 
+        now = time(NULL);
+        for (int i = 0; i < POOL_MAX_CNT; i++) 
         {
             conn_check(i);
         }
+        sleep(1);
     }
     return NULL;
 }
@@ -104,11 +106,11 @@ void *worker_cas(void *arg)
                 return_conn_cas(res);
                 break;
             }
-            else if((res = add_conn()) != -1)
-            {
-                return_conn_cas(res);
-                break;
-            }
+            // else if((res = add_conn()) != -1)
+            // {
+            //     return_conn_cas(res);
+            //     break;
+            // }
         }
     }
     printf("%d %d\n", get, cash);
@@ -120,7 +122,7 @@ int get_conn()
     int i = 0;
     int res = -1;
     pthread_mutex_lock(&lock); 
-    for (i = 0; i < POOL_MIN_CNT; i++)
+    for (i = 0; i < POOL_MAX_CNT; i++)
     {
         if (!conn_lock_status[i])
         {
@@ -135,7 +137,7 @@ int get_conn()
 
 int get_conn_long() 
 {
-    for (int i = 0; i < conn_cnt; i++) 
+    for (int i = 0; i < POOL_MAX_CNT; i++) 
     {
         if(__sync_bool_compare_and_swap(&conn_cas_status[i].value, 0, 1)) 
         {
@@ -172,7 +174,7 @@ int add_conn()
         if(__sync_bool_compare_and_swap(&conn_cas_status[i].flag, CLOSED, IN_USING))
         {
             //언제 할당했는지 정보 필요
-            conn_cas_status[i].updated = time(NULL);
+            conn_cas_status[i].updated = now;       //매번 시간 계산 대신 하우스 키퍼 계산한 시간 사용
             return i;
         }
     }
@@ -191,16 +193,41 @@ void return_conn(int i)
 
 void return_conn_cas(int i)
 {
-    conn_cas_status[i].flag = NONE;
-    //conn_cas_status[i].updated = time(NULL);  -> 자원 많이 
-    __sync_bool_compare_and_swap(&conn_cas_status[i].value, 1, 0);
+    if(is_valid(i))
+    {
+        //커넥션이 멀정하면
+        conn_cas_status[i].updated = now;
+        __sync_bool_compare_and_swap(&conn_cas_status[i].value, 1, 0);
+    }
+    else
+    {
+        //커넥션 닫기
+        conn_cas_status[i].flag = CLOSED;
+    }
 }
 
 void conn_check(int i)
 {
-    //1. 아이들 오래된 커넥션 끊고 재연결 
-    //2. 끊어졌으면 새로 연결
-    //3. 커넥션수 체크후 1분동안 안썼으면 컨 줄이기 -> 
+    //1. 아이들
+    if(__sync_bool_compare_and_swap(&conn_cas_status[i].value, 0, 1))
+    {
+        if(conn_cas_status[i].updated + 60 < now || is_valid(i) != 1)                 //오래됬거나 끊어 졌으면
+        {
+            //대충 재연결
+            conn_cas_status[i].updated = now;
+            conn_cas_status[i].flag = IN_USING;
+        }
+        __sync_bool_compare_and_swap(&conn_cas_status[i].value, 1, 0);
+    }
+    //2. 닫힌 커넥션
+    else if (__sync_bool_compare_and_swap(&conn_cas_status[i].value, 1, 1) && conn_cas_status[i].flag == CLOSED)
+    {
+        //재연결
+        conn_cas_status[i].updated = now;
+        conn_cas_status[i].flag = IN_USING;
+        __sync_bool_compare_and_swap(&conn_cas_status[i].value, 1, 0);
+    }
+
 }
 
 int main() 
@@ -235,11 +262,11 @@ int main()
 
     printf("MUTEX 실행 시간: %ld 마이크로초 (%.3f초)\n", elapsed, elapsed / 1000000.0);
 
-    for(i = POOL_MIN_CNT; i < POOL_MAX_CNT; i++)
-    {
-        conn_cas_status[i].value = 1;
-        conn_cas_status[i].flag = CLOSED;
-    }
+    // for(i = POOL_MIN_CNT; i < POOL_MAX_CNT; i++)
+    // {
+    //     conn_cas_status[i].value = 1;
+    //     conn_cas_status[i].flag = CLOSED;
+    // }
 
     gettimeofday(&start, NULL);
 
@@ -264,4 +291,11 @@ int main()
     return 0;
 }
 
-
+/*
+* 커넥션 확인 함수
+* ex) pq_status()
+*/
+int is_valid(int index)
+{
+    return 1;
+}
