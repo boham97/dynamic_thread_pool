@@ -238,7 +238,7 @@ int main()
     long elapsed;
     pthread_t thread_lock[THREAD_CNT];
     pthread_t thread_cas[THREAD_CNT];
-    
+    pthread_t hk;
     pthread_mutex_init(&lock, NULL); // 뮤텍스 초기화
     int i = 0;
 
@@ -268,6 +268,7 @@ int main()
     //     conn_cas_status[i].flag = CLOSED;
     // }
 
+    pthread_create(&hk, NULL, house_keeper, NULL);
     gettimeofday(&start, NULL);
 
     for(i = 0; i< THREAD_CNT; i++)
@@ -282,7 +283,7 @@ int main()
     }
 
     gettimeofday(&end, NULL);
-    
+    //pthread_join(hk, NULL);
     elapsed = (end.tv_sec - start.tv_sec) * 1000000L + (end.tv_usec - start.tv_usec);
     printf("CAS 실행 시간: %ld 마이크로초 (%.3f초)\n", elapsed, elapsed / 1000000.0);
 
