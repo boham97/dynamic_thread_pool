@@ -5,10 +5,9 @@
 #include <sys/time.h>
 
 #define THREAD_CNT 30
-#define POOL_MIN_CNT 60
-#define POOL_MAX_CNT 60
-#define TRY 1000
-#define SLEEP 0
+#define POOL_MIN_CNT 10
+#define POOL_MAX_CNT 20
+#define TRY 100000
 
 
 //점유 플래그
@@ -143,7 +142,7 @@ void *worker_cas(void *arg)
                 break;
             }
         }
-        usleep(10000);
+        //usleep(10000);
         return_conn_cas(res);
     }
     printf("%d %d\n", get, cash);
@@ -266,27 +265,16 @@ int main()
     int i = 0;
 
     gettimeofday(&start, NULL);
-    for(i =0; i < TRY; i++)
-        usleep(10000);
-
-    gettimeofday(&end, NULL);
-    
-    elapsed = (end.tv_sec - start.tv_sec) * 1000000L + (end.tv_usec - start.tv_usec);
-
-    printf("sleep 실행 시간: %ld 마이크로초 (%.3f초)\n", elapsed, elapsed / 1000000.0);
-
-
-    gettimeofday(&start, NULL);
 
     for(i = 0; i< THREAD_CNT; i++)
     {
-        //pthread_create(&thread_lock[i], NULL, worker_lock, NULL);
+        pthread_create(&thread_lock[i], NULL, worker_lock, NULL);
     }
 
     
     for (i = 0; i < THREAD_CNT; i++) 
     {
-        //pthread_join(thread_lock[i], NULL);
+        pthread_join(thread_lock[i], NULL);
     }
 
     gettimeofday(&end, NULL);
