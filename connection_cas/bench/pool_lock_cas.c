@@ -3,12 +3,15 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <libpq-fe.h>
 
 #define THREAD_CNT 30
 #define POOL_MIN_CNT 10
 #define POOL_MAX_CNT 20
-#define TRY 100000
+#define TRY 10000000
 
+// DB 접속 정보 (원하는 값으로 수정)
+#define PG_CONNINFO "host=localhost dbname=postgres user=postgres password=postgres"
 
 //점유 플래그
 enum conn_flag
@@ -26,6 +29,7 @@ struct aligned_int
     long updated;                   //커넥션 아이들 시작 시간 -> 오래 돠면 제거
     long created;                   //커넥션 생성 시간 -> 오래되면 재 연결
     enum conn_flag flag;            //점유 상황
+    PGconn* conn;                   // libpq 커넥션 핸들 추가
     char padding[40];               // 64바이트 정렬
 } __attribute__((aligned(64)));
 
@@ -63,6 +67,10 @@ void *house_keeper(void *arg)
                 {
                     //대충 연결 해제
                     printf("hk conn close\n");
+                    if (conn_cas_status[i].conn) {
+                        PQfinish(conn_cas_status[i].conn);
+                        conn_cas_status[i].conn = NULL;
+                    }
                     conn_cas_status[i].flag = CLOSED;
                     conn_count--;
                 }
@@ -76,7 +84,16 @@ void *house_keeper(void *arg)
             else if (__sync_bool_compare_and_swap(&conn_cas_status[i].value, 1, 1) && conn_cas_status[i].flag == CLOSED)
             {
                 //재연결
-                //printf("hk reconnect\n");
+                if (conn_cas_status[i].conn) {
+                    PQfinish(conn_cas_status[i].conn);
+                }
+                conn_cas_status[i].conn = PQconnectdb(PG_CONNINFO);
+                if (PQstatus(conn_cas_status[i].conn) != CONNECTION_OK) {
+                    fprintf(stderr, "Reconnect failed: %s\n", PQerrorMessage(conn_cas_status[i].conn));
+                    PQfinish(conn_cas_status[i].conn);
+                    conn_cas_status[i].conn = NULL;
+                    continue;
+                }
                 conn_cas_status[i].created = now;
                 conn_cas_status[i].updated = now;
                 conn_cas_status[i].flag = IN_USING;
@@ -213,11 +230,22 @@ int add_conn()
         //대충 커넥션 만드는 로직 
         if(__sync_bool_compare_and_swap(&conn_cas_status[i].flag, CLOSED, IN_USING))
         {
-            //언제 할당했는지 정보 필요
+            // libpq 커넥션 생성
+            if (conn_cas_status[i].conn) {
+                PQfinish(conn_cas_status[i].conn);
+            }
+            conn_cas_status[i].conn = PQconnectdb(PG_CONNINFO);
+            if (PQstatus(conn_cas_status[i].conn) != CONNECTION_OK) {
+                fprintf(stderr, "Connection to database failed: %s\n", PQerrorMessage(conn_cas_status[i].conn));
+                PQfinish(conn_cas_status[i].conn);
+                conn_cas_status[i].conn = NULL;
+                conn_cas_status[i].flag = CLOSED;
+                continue;
+            }
             pthread_setspecific(key, (void *)(intptr_t)i);
             conn_cas_status[i].updated = now;       //매번 시간 계산 대신 하우스 키퍼 계산한 시간 사용
             conn_cas_status[i].created = now;
-            printf("addconn deetected %d\n", i);
+            printf("addconn detected %d\n", i);
             return i;
         }
     }
@@ -247,6 +275,10 @@ void return_conn_cas(int i)
     {
         //커넥션 닫기
         printf("%ld %ld conn close\n", now, conn_cas_status[i].created );
+        if (conn_cas_status[i].conn) {
+            PQfinish(conn_cas_status[i].conn);
+            conn_cas_status[i].conn = NULL;
+        }
         conn_cas_status[i].flag = CLOSED;
     }
 }
@@ -263,6 +295,12 @@ int main()
     pthread_t hk;
     pthread_mutex_init(&lock, NULL); // 뮤텍스 초기화
     int i = 0;
+
+    // libpq 커넥션 초기화
+    for(i = 0; i < POOL_MAX_CNT; i++)
+    {
+        conn_cas_status[i].conn = NULL;
+    }
 
     gettimeofday(&start, NULL);
 
@@ -291,6 +329,14 @@ int main()
             conn_cas_status[i].updated = time(NULL);
             conn_cas_status[i].created = time(NULL);
             conn_cas_status[i].flag = IN_USING;
+            // 커넥션 생성
+            conn_cas_status[i].conn = PQconnectdb(PG_CONNINFO);
+            if (PQstatus(conn_cas_status[i].conn) != CONNECTION_OK) {
+                fprintf(stderr, "Init connection failed: %s\n", PQerrorMessage(conn_cas_status[i].conn));
+                PQfinish(conn_cas_status[i].conn);
+                conn_cas_status[i].conn = NULL;
+                conn_cas_status[i].flag = CLOSED;
+            }
         }
         else
         {
@@ -298,6 +344,7 @@ int main()
             conn_cas_status[i].updated = 0;
             conn_cas_status[i].created = 0;
             conn_cas_status[i].flag = CLOSED;            
+            conn_cas_status[i].conn = NULL;
         }
         //printf("%ld %ld\n", conn_cas_status[i].created, conn_cas_status[i].updated);
     }
@@ -332,5 +379,6 @@ int main()
 */
 int is_valid(int index)
 {
-    return 1;
+    if (conn_cas_status[index].conn == NULL) return 0;
+    return PQstatus(conn_cas_status[index].conn) == CONNECTION_OK;
 }
