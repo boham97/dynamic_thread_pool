@@ -218,6 +218,7 @@ int set_nonblock(int fd) {
 
 int main() {
     //db pool
+    pthread_t workers[4];
     {
 
         // PostgreSQL 연결 풀 초기화
@@ -228,7 +229,6 @@ int main() {
         g_queue = init_task_queue();
         
         // 워커 스레드 생성
-        pthread_t workers[4];
         for (int i = 0; i < 4; i++) {
             pthread_create(&workers[i], NULL, db_worker, NULL);
         }
