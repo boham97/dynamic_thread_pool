@@ -120,9 +120,12 @@ int hash_insert(hash_map *map, unsigned long tid, int value)
 
     while(entry)
     {
-        if(entry->key == new_entry->key && !entry->delete_flag)
+        if(entry->key == new_entry->key)
         {
+            // 살아있는 노드: 값 갱신
+            // 삭제된 노드: delete_flag 해제 후 재활용
             entry->value = value;
+            entry->delete_flag = FALSE;
             free(new_entry);
             release_lock(map, index);
             return SUCCESS;
