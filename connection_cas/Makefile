@@ -2,8 +2,8 @@ CC      = gcc
 CFLAGS  = -Wall -Wextra -O2 -I/usr/include/postgresql
 LDFLAGS = -lpq -lpthread
 
-TARGET  = housekeeper_test
-SRCS    = main.c housekeeper.c
+TARGET  = queue_test
+SRCS    = main.c thread_safe_queue.c
 
 all: $(TARGET)
 
