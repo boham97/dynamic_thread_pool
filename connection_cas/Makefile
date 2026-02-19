@@ -3,7 +3,7 @@ CFLAGS  = -Wall -Wextra -O2 -I/usr/include/postgresql
 LDFLAGS = -lpq -lpthread
 
 TARGET  = queue_test
-SRCS    = main.c thread_safe_queue.c
+SRCS    = main.c thread_safe_queue.c conn_pool.c
 
 all: $(TARGET)
 
