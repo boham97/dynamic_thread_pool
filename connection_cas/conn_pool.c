@@ -1,4 +1,5 @@
 #include "conn_pool.h"
+#include <stdint.h>
 
 PGconn *get_conn(conn_pool *pool)
 {
@@ -27,18 +28,20 @@ PGconn *get_conn(conn_pool *pool)
     return get_conn(pool);
 }
 
-// ─── get_conn_2: TLS로 fast path 캐시 ────────────────────────
-
-static __thread int tls_conn_index = -1;
+// ─── get_conn_2: per-pool pthread_key_t TLS fast path ────────
 
 PGconn *get_conn_2(conn_pool *pool)
 {
     int i;
 
-    // fast path: TLS에 캐싱된 인덱스로 바로 시도
-    if (tls_conn_index != -1 &&
-        __sync_bool_compare_and_swap(&pool->state[tls_conn_index], CONN_AVAILABLE, CONN_UNAVAILABLE))
-        return pool->conn_list[tls_conn_index];
+    // fast path: 이 풀 전용 TLS에서 인덱스 조회 (저장값 = index+1, 0=미설정)
+    intptr_t cached = (intptr_t)pthread_getspecific(pool->tls_key);
+    if (cached > 0)
+    {
+        int idx = (int)(cached - 1);
+        if (__sync_bool_compare_and_swap(&pool->state[idx], CONN_AVAILABLE, CONN_UNAVAILABLE))
+            return pool->conn_list[idx];
+    }
 
     // slow path: 풀 전체 순회
     for (i = 0; i < CONN_SIZE; i++)
@@ -46,7 +49,7 @@ PGconn *get_conn_2(conn_pool *pool)
         if (!__sync_bool_compare_and_swap(&pool->state[i], CONN_AVAILABLE, CONN_UNAVAILABLE))
             continue;
 
-        tls_conn_index = i;
+        pthread_setspecific(pool->tls_key, (void *)(intptr_t)(i + 1));
         return pool->conn_list[i];
     }
 

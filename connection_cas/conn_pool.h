@@ -23,11 +23,12 @@ enum state_flag
 
 typedef struct
 {
-    PGconn   *conn_list[CONN_SIZE];
-    int       state[CONN_SIZE];   // CAS로 점유 관리 (AVAILABLE/UNAVAILABLE)
-    hash_map *map;                // tid → conn index 캐시
-    wait_que *que;                // 풀 고갈 시 대기 큐
-    char      connect_info[1024];
+    PGconn        *conn_list[CONN_SIZE];
+    int            state[CONN_SIZE];   // CAS로 점유 관리 (AVAILABLE/UNAVAILABLE)
+    hash_map      *map;                // tid → conn index 캐시 (get_conn용)
+    wait_que      *que;                // 풀 고갈 시 대기 큐
+    pthread_key_t  tls_key;           // per-pool TLS 키 (get_conn_2용)
+    char           connect_info[1024];
 } conn_pool;
 
 PGconn *get_conn(conn_pool *pool);    // 캐시: hash_map (tid → index)

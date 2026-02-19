@@ -192,7 +192,14 @@ static conn_pool* make_mock_pool(PGconn_mock *mocks, int n)
     pool->que = &g_que;
     hash_init(pool->map);
     queue_init(pool->que);
+    pthread_key_create(&pool->tls_key, NULL);
     return pool;
+}
+
+static void free_mock_pool(conn_pool *pool)
+{
+    pthread_key_delete(pool->tls_key);
+    free(pool);
 }
 
 // ─── conn_pool 단일 스레드 테스트 ────────────────────────────
@@ -227,7 +234,7 @@ void test_conn_single()
     assert(c1 == c2);
     release_conn(pool, c2);
 
-    free(pool);
+    free_mock_pool(pool);
     printf("[PASS] test_conn_single\n");
 }
 
@@ -285,7 +292,7 @@ void test_conn_multi()
     for(i = 0; i < CP_THREADS; i++)
         total_errors += args[i].errors;
 
-    free(pool);
+    free_mock_pool(pool);
 
     if(total_errors == 0)
         printf("[PASS] test_conn_multi (%d threads x %d iter, pool=%d)\n",
@@ -348,7 +355,7 @@ void bench_get_conn(const char *label, get_conn_fn get_fn)
     double ms      = elapsed_ms(&s, &e);
     double mops    = total_ops / ms / 1000.0;   // Mops/s
 
-    free(pool);
+    free_mock_pool(pool);
     printf("[BENCH] %-10s  %ld ops  %.2f ms  %.2f Mops/s\n",
            label, total_ops, ms, mops);
 }
@@ -379,6 +386,7 @@ static conn_pool *make_pg_pool(const char *conninfo, int n)
     pool->que = &g_pg_que;
     hash_init(pool->map);
     queue_init(pool->que);
+    pthread_key_create(&pool->tls_key, NULL);
 
     for (i = 0; i < n; i++)
     {
@@ -400,6 +408,7 @@ static void free_pg_pool(conn_pool *pool)
     for (i = 0; i < CONN_SIZE; i++)
         if (pool->conn_list[i])
             PQfinish(pool->conn_list[i]);
+    pthread_key_delete(pool->tls_key);
     free(pool);
 }
 
