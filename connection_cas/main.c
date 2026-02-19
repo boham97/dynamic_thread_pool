@@ -294,6 +294,67 @@ void test_conn_multi()
         printf("[FAIL] test_conn_multi: %d errors\n", total_errors);
 }
 
+// ─── 마이크로벤치: mock pool, get/release만 수백만 회 ─────────
+
+#define BENCH_THREADS  24        // Ryzen 5600: 6코어 12스레드 → 2배
+#define BENCH_ITER     1000000   // 스레드당 100만 회
+
+typedef PGconn *(*get_conn_fn)(conn_pool *);
+
+typedef struct {
+    conn_pool   *pool;
+    get_conn_fn  get_fn;
+    long         ops;
+} bench_arg_t;
+
+void *bench_worker(void *arg)
+{
+    bench_arg_t *a = (bench_arg_t *)arg;
+    int i;
+    for (i = 0; i < BENCH_ITER; i++)
+    {
+        PGconn *conn = a->get_fn(a->pool);
+        release_conn(a->pool, conn);
+    }
+    a->ops = BENCH_ITER;
+    return NULL;
+}
+
+void bench_get_conn(const char *label, get_conn_fn get_fn)
+{
+    PGconn_mock mocks[CONN_SIZE];
+    conn_pool *pool = make_mock_pool(mocks, CONN_SIZE);
+
+    pthread_t   threads[BENCH_THREADS];
+    bench_arg_t args[BENCH_THREADS];
+    int i;
+
+    struct timespec s, e;
+    clock_gettime(CLOCK_MONOTONIC, &s);
+
+    for (i = 0; i < BENCH_THREADS; i++)
+    {
+        args[i].pool   = pool;
+        args[i].get_fn = get_fn;
+        args[i].ops    = 0;
+        pthread_create(&threads[i], NULL, bench_worker, &args[i]);
+    }
+    for (i = 0; i < BENCH_THREADS; i++)
+        pthread_join(threads[i], NULL);
+
+    clock_gettime(CLOCK_MONOTONIC, &e);
+
+    long total_ops = (long)BENCH_THREADS * BENCH_ITER;
+    double ms      = elapsed_ms(&s, &e);
+    double mops    = total_ops / ms / 1000.0;   // Mops/s
+
+    free(pool);
+    printf("[BENCH] %-10s  %ld ops  %.2f ms  %.2f Mops/s\n",
+           label, total_ops, ms, mops);
+}
+
+// ─── PG 공통 타입 ────────────────────────────────────────────
+
 // ─── PG 실접속 풀 헬퍼 ───────────────────────────────────────
 
 #define DB_HOST "host.docker.internal"
@@ -344,16 +405,16 @@ static void free_pg_pool(conn_pool *pool)
 
 // ─── PG 단일스레드: 다양한 쿼리 타입 검증 ───────────────────
 
-void test_pg_single()
+void test_pg_single(const char *label, get_conn_fn get_fn)
 {
     int ok = 1;
-    printf("[RUN] test_pg_single\n");
+    printf("[RUN] test_pg_single (%s)\n", label);
 
     conn_pool *pool = make_pg_pool(PG_CONNINFO, CONN_SIZE);
     if (!pool) { printf("[SKIP] test_pg_single: pool 생성 실패\n"); return; }
 
-    RUN_TIMED("test_pg_single", {
-        PGconn *conn = get_conn(pool);
+    RUN_TIMED(label, {
+        PGconn *conn = get_fn(pool);
         if (!conn) { printf("[FAIL] get_conn NULL\n"); ok = 0; goto pg_single_done; }
 
         PGresult *res;
@@ -405,9 +466,9 @@ void test_pg_single()
 
         // 5) fast path 확인: 같은 스레드 재요청 시 같은 커넥션 반환
         release_conn(pool, conn);
-        PGconn *c1 = get_conn(pool);
+        PGconn *c1 = get_fn(pool);
         release_conn(pool, c1);
-        PGconn *c2 = get_conn(pool);
+        PGconn *c2 = get_fn(pool);
         assert(c1 == c2);
         release_conn(pool, c2);
 
@@ -415,7 +476,7 @@ void test_pg_single()
     });
 
     free_pg_pool(pool);
-    printf(ok ? "[PASS] test_pg_single\n" : "[FAIL] test_pg_single\n");
+    printf(ok ? "[PASS] test_pg_single (%s)\n" : "[FAIL] test_pg_single (%s)\n", label);
 }
 
 // ─── PG 멀티스레드: 풀 고갈 포함 동시 쿼리 ─────────────────
@@ -425,10 +486,11 @@ void test_pg_single()
 #define PG_ITER     200
 
 typedef struct {
-    conn_pool *pool;
-    int        thread_index;
-    int        errors;
-    int        queries;
+    conn_pool   *pool;
+    get_conn_fn  get_fn;
+    int          thread_index;
+    int          errors;
+    int          queries;
 } pg_worker_arg_t;
 
 void *pg_worker(void *arg)
@@ -437,7 +499,7 @@ void *pg_worker(void *arg)
     int i;
     for (i = 0; i < PG_ITER; i++)
     {
-        PGconn *conn = get_conn(a->pool);
+        PGconn *conn = a->get_fn(a->pool);
         if (!conn) { a->errors++; continue; }
 
         // 쿼리마다 결과값 검증
@@ -471,10 +533,10 @@ void *pg_worker(void *arg)
     return NULL;
 }
 
-void test_pg_multi()
+void test_pg_multi(const char *label, get_conn_fn get_fn)
 {
-    printf("[RUN] test_pg_multi (%d threads x %d iter, pool=%d)\n",
-           PG_THREADS, PG_ITER, CONN_SIZE);
+    printf("[RUN] test_pg_multi (%s, %d threads x %d iter, pool=%d)\n",
+           label, PG_THREADS, PG_ITER, CONN_SIZE);
 
     conn_pool *pool = make_pg_pool(PG_CONNINFO, CONN_SIZE);
     if (!pool) { printf("[SKIP] test_pg_multi: pool 생성 실패\n"); return; }
@@ -483,10 +545,11 @@ void test_pg_multi()
     pg_worker_arg_t args[PG_THREADS];
     int i, total_errors = 0, total_queries = 0;
 
-    RUN_TIMED("test_pg_multi", {
+    RUN_TIMED(label, {
         for (i = 0; i < PG_THREADS; i++)
         {
             args[i].pool         = pool;
+            args[i].get_fn       = get_fn;
             args[i].thread_index = i + 1;
             args[i].errors       = 0;
             args[i].queries      = 0;
@@ -506,9 +569,9 @@ void test_pg_multi()
 
     printf("  queries: %d / %d\n", total_queries, PG_THREADS * PG_ITER);
     if (total_errors == 0)
-        printf("[PASS] test_pg_multi\n");
+        printf("[PASS] test_pg_multi (%s)\n", label);
     else
-        printf("[FAIL] test_pg_multi: %d errors\n", total_errors);
+        printf("[FAIL] test_pg_multi (%s): %d errors\n", label, total_errors);
 }
 
 // ─── PG 스트레스: BEGIN/COMMIT 트랜잭션 + 풀 반납 정확성 ─────
@@ -517,9 +580,10 @@ void test_pg_multi()
 #define PG_STRESS_ITER     100
 
 typedef struct {
-    conn_pool *pool;
-    int        thread_index;
-    int        errors;
+    conn_pool   *pool;
+    get_conn_fn  get_fn;
+    int          thread_index;
+    int          errors;
 } pg_stress_arg_t;
 
 void *pg_stress_worker(void *arg)
@@ -528,7 +592,7 @@ void *pg_stress_worker(void *arg)
     int i;
     for (i = 0; i < PG_STRESS_ITER; i++)
     {
-        PGconn *conn = get_conn(a->pool);
+        PGconn *conn = a->get_fn(a->pool);
         if (!conn) { a->errors++; continue; }
 
         PGresult *res;
@@ -550,10 +614,10 @@ void *pg_stress_worker(void *arg)
     return NULL;
 }
 
-void test_pg_stress()
+void test_pg_stress(const char *label, get_conn_fn get_fn)
 {
-    printf("[RUN] test_pg_stress (%d threads x %d iter, pool=%d)\n",
-           PG_STRESS_THREADS, PG_STRESS_ITER, CONN_SIZE);
+    printf("[RUN] test_pg_stress (%s, %d threads x %d iter, pool=%d)\n",
+           label, PG_STRESS_THREADS, PG_STRESS_ITER, CONN_SIZE);
 
     conn_pool *pool = make_pg_pool(PG_CONNINFO, CONN_SIZE);
     if (!pool) { printf("[SKIP] test_pg_stress: pool 생성 실패\n"); return; }
@@ -562,10 +626,11 @@ void test_pg_stress()
     pg_stress_arg_t args[PG_STRESS_THREADS];
     int i, total_errors = 0;
 
-    RUN_TIMED("test_pg_stress", {
+    RUN_TIMED(label, {
         for (i = 0; i < PG_STRESS_THREADS; i++)
         {
             args[i].pool         = pool;
+            args[i].get_fn       = get_fn;
             args[i].thread_index = i + 1;
             args[i].errors       = 0;
             pthread_create(&threads[i], NULL, pg_stress_worker, &args[i]);
@@ -580,9 +645,9 @@ void test_pg_stress()
     free_pg_pool(pool);
 
     if (total_errors == 0)
-        printf("[PASS] test_pg_stress\n");
+        printf("[PASS] test_pg_stress (%s)\n", label);
     else
-        printf("[FAIL] test_pg_stress: %d errors\n", total_errors);
+        printf("[FAIL] test_pg_stress (%s): %d errors\n", label, total_errors);
 }
 
 // ─── main ────────────────────────────────────────────────────
@@ -595,9 +660,18 @@ int main()
     test_conn_single();
     test_conn_multi();
 
-    printf("\n--- PG 실접속 테스트 (%s) ---\n", PG_CONNINFO);
-    test_pg_single();
-    test_pg_multi();
-    test_pg_stress();
+    printf("\n=== 마이크로벤치 (%d threads x %d iter) ===\n", BENCH_THREADS, BENCH_ITER);
+    bench_get_conn("hash_map", get_conn);
+    bench_get_conn("TLS",      get_conn_2);
+
+    printf("\n=== PG 실접속 테스트 [hash_map] (%s) ===\n", PG_CONNINFO);
+    test_pg_single("hash_map", get_conn);
+    test_pg_multi ("hash_map", get_conn);
+    test_pg_stress("hash_map", get_conn);
+
+    printf("\n=== PG 실접속 테스트 [TLS] (%s) ===\n", PG_CONNINFO);
+    test_pg_single("TLS", get_conn_2);
+    test_pg_multi ("TLS", get_conn_2);
+    test_pg_stress("TLS", get_conn_2);
     return 0;
 }

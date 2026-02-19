@@ -30,7 +30,8 @@ typedef struct
     char      connect_info[1024];
 } conn_pool;
 
-PGconn *get_conn(conn_pool *pool);
+PGconn *get_conn(conn_pool *pool);    // 캐시: hash_map (tid → index)
+PGconn *get_conn_2(conn_pool *pool);  // 캐시: TLS (__thread)
 void    release_conn(conn_pool *pool, PGconn *conn);
 
 #endif // CONN_POOL_H
