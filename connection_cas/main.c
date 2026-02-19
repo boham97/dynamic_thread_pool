@@ -5,6 +5,25 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <unistd.h>
+#include <string.h>
+#include <time.h>
+
+// ─── 시간 측정 헬퍼 ──────────────────────────────────────────
+
+static double elapsed_ms(struct timespec *s, struct timespec *e)
+{
+    return (e->tv_sec - s->tv_sec) * 1000.0
+         + (e->tv_nsec - s->tv_nsec) / 1e6;
+}
+
+#define RUN_TIMED(label, block)                              \
+    do {                                                     \
+        struct timespec _s, _e;                              \
+        clock_gettime(CLOCK_MONOTONIC, &_s);                 \
+        block                                                \
+        clock_gettime(CLOCK_MONOTONIC, &_e);                 \
+        printf("  elapsed: %.2f ms\n", elapsed_ms(&_s, &_e));\
+    } while(0)
 
 // PGconn mock: 더미 구조체를 PGconn* 로 캐스팅해서 사용
 typedef struct { int id; } PGconn_mock;
@@ -275,6 +294,297 @@ void test_conn_multi()
         printf("[FAIL] test_conn_multi: %d errors\n", total_errors);
 }
 
+// ─── PG 실접속 풀 헬퍼 ───────────────────────────────────────
+
+#define DB_HOST "host.docker.internal"
+#define DB_PORT "5432"
+#define DB_NAME "pgdb"
+#define DB_USER "pguser"
+#define DB_PASS "pgpass"
+#define PG_CONNINFO "host=" DB_HOST " port=" DB_PORT " dbname=" DB_NAME " user=" DB_USER " password=" DB_PASS
+
+static hash_map g_pg_map;
+static wait_que g_pg_que;
+
+static conn_pool *make_pg_pool(const char *conninfo, int n)
+{
+    int i;
+    conn_pool *pool = calloc(1, sizeof(conn_pool));
+    if (!pool)
+        return NULL;
+
+    strncpy(pool->connect_info, conninfo, sizeof(pool->connect_info) - 1);
+    pool->map = &g_pg_map;
+    pool->que = &g_pg_que;
+    hash_init(pool->map);
+    queue_init(pool->que);
+
+    for (i = 0; i < n; i++)
+    {
+        pool->conn_list[i] = PQconnectdb(conninfo);
+        if (PQstatus(pool->conn_list[i]) != CONNECTION_OK)
+        {
+            fprintf(stderr, "[ERR] PQconnectdb[%d]: %s\n",
+                    i, PQerrorMessage(pool->conn_list[i]));
+            PQfinish(pool->conn_list[i]);
+            pool->conn_list[i] = NULL;
+        }
+    }
+    return pool;
+}
+
+static void free_pg_pool(conn_pool *pool)
+{
+    int i;
+    for (i = 0; i < CONN_SIZE; i++)
+        if (pool->conn_list[i])
+            PQfinish(pool->conn_list[i]);
+    free(pool);
+}
+
+// ─── PG 단일스레드: 다양한 쿼리 타입 검증 ───────────────────
+
+void test_pg_single()
+{
+    int ok = 1;
+    printf("[RUN] test_pg_single\n");
+
+    conn_pool *pool = make_pg_pool(PG_CONNINFO, CONN_SIZE);
+    if (!pool) { printf("[SKIP] test_pg_single: pool 생성 실패\n"); return; }
+
+    RUN_TIMED("test_pg_single", {
+        PGconn *conn = get_conn(pool);
+        if (!conn) { printf("[FAIL] get_conn NULL\n"); ok = 0; goto pg_single_done; }
+
+        PGresult *res;
+
+        // 1) 산술 연산 검증
+        res = PQexec(conn, "SELECT 6 * 7");
+        assert(PQresultStatus(res) == PGRES_TUPLES_OK);
+        assert(strcmp(PQgetvalue(res, 0, 0), "42") == 0);
+        PQclear(res);
+
+        // 2) 임시 테이블 생성 → 100행 INSERT → COUNT 검증
+        res = PQexec(conn, "CREATE TEMP TABLE _bench(id SERIAL, val INT)");
+        assert(PQresultStatus(res) == PGRES_COMMAND_OK);
+        PQclear(res);
+
+        int i;
+        for (i = 0; i < 100; i++)
+        {
+            char sql[64];
+            snprintf(sql, sizeof(sql), "INSERT INTO _bench(val) VALUES(%d)", i);
+            res = PQexec(conn, sql);
+            if (PQresultStatus(res) != PGRES_COMMAND_OK)
+            {
+                fprintf(stderr, "[FAIL] INSERT %d: %s\n", i, PQerrorMessage(conn));
+                ok = 0;
+            }
+            PQclear(res);
+        }
+
+        res = PQexec(conn, "SELECT COUNT(*) FROM _bench");
+        assert(PQresultStatus(res) == PGRES_TUPLES_OK);
+        assert(strcmp(PQgetvalue(res, 0, 0), "100") == 0);
+        PQclear(res);
+
+        // 3) SUM 검증 (0+1+...+99 = 4950)
+        res = PQexec(conn, "SELECT SUM(val) FROM _bench");
+        assert(PQresultStatus(res) == PGRES_TUPLES_OK);
+        assert(strcmp(PQgetvalue(res, 0, 0), "4950") == 0);
+        PQclear(res);
+
+        // 4) DELETE → 빈 테이블 확인
+        res = PQexec(conn, "DELETE FROM _bench");
+        assert(PQresultStatus(res) == PGRES_COMMAND_OK);
+        PQclear(res);
+
+        res = PQexec(conn, "SELECT COUNT(*) FROM _bench");
+        assert(strcmp(PQgetvalue(res, 0, 0), "0") == 0);
+        PQclear(res);
+
+        // 5) fast path 확인: 같은 스레드 재요청 시 같은 커넥션 반환
+        release_conn(pool, conn);
+        PGconn *c1 = get_conn(pool);
+        release_conn(pool, c1);
+        PGconn *c2 = get_conn(pool);
+        assert(c1 == c2);
+        release_conn(pool, c2);
+
+        pg_single_done:;
+    });
+
+    free_pg_pool(pool);
+    printf(ok ? "[PASS] test_pg_single\n" : "[FAIL] test_pg_single\n");
+}
+
+// ─── PG 멀티스레드: 풀 고갈 포함 동시 쿼리 ─────────────────
+
+// 스레드 수를 CONN_SIZE 보다 크게 설정해 풀 고갈(대기 큐) 경로도 검증
+#define PG_THREADS  20
+#define PG_ITER     200
+
+typedef struct {
+    conn_pool *pool;
+    int        thread_index;
+    int        errors;
+    int        queries;
+} pg_worker_arg_t;
+
+void *pg_worker(void *arg)
+{
+    pg_worker_arg_t *a = (pg_worker_arg_t *)arg;
+    int i;
+    for (i = 0; i < PG_ITER; i++)
+    {
+        PGconn *conn = get_conn(a->pool);
+        if (!conn) { a->errors++; continue; }
+
+        // 쿼리마다 결과값 검증
+        char sql[64];
+        snprintf(sql, sizeof(sql), "SELECT %d * 2", i);
+        PGresult *res = PQexec(conn, sql);
+
+        if (PQresultStatus(res) != PGRES_TUPLES_OK)
+        {
+            fprintf(stderr, "[ERR] thread %d iter %d: %s\n",
+                    a->thread_index, i, PQerrorMessage(conn));
+            a->errors++;
+        }
+        else
+        {
+            int expected = i * 2;
+            char exp_str[32];
+            snprintf(exp_str, sizeof(exp_str), "%d", expected);
+            if (strcmp(PQgetvalue(res, 0, 0), exp_str) != 0)
+            {
+                fprintf(stderr, "[ERR] thread %d: expected %s got %s\n",
+                        a->thread_index, exp_str, PQgetvalue(res, 0, 0));
+                a->errors++;
+            }
+            else
+                a->queries++;
+        }
+        PQclear(res);
+        release_conn(a->pool, conn);
+    }
+    return NULL;
+}
+
+void test_pg_multi()
+{
+    printf("[RUN] test_pg_multi (%d threads x %d iter, pool=%d)\n",
+           PG_THREADS, PG_ITER, CONN_SIZE);
+
+    conn_pool *pool = make_pg_pool(PG_CONNINFO, CONN_SIZE);
+    if (!pool) { printf("[SKIP] test_pg_multi: pool 생성 실패\n"); return; }
+
+    pthread_t       threads[PG_THREADS];
+    pg_worker_arg_t args[PG_THREADS];
+    int i, total_errors = 0, total_queries = 0;
+
+    RUN_TIMED("test_pg_multi", {
+        for (i = 0; i < PG_THREADS; i++)
+        {
+            args[i].pool         = pool;
+            args[i].thread_index = i + 1;
+            args[i].errors       = 0;
+            args[i].queries      = 0;
+            pthread_create(&threads[i], NULL, pg_worker, &args[i]);
+        }
+        for (i = 0; i < PG_THREADS; i++)
+            pthread_join(threads[i], NULL);
+    });
+
+    for (i = 0; i < PG_THREADS; i++)
+    {
+        total_errors  += args[i].errors;
+        total_queries += args[i].queries;
+    }
+
+    free_pg_pool(pool);
+
+    printf("  queries: %d / %d\n", total_queries, PG_THREADS * PG_ITER);
+    if (total_errors == 0)
+        printf("[PASS] test_pg_multi\n");
+    else
+        printf("[FAIL] test_pg_multi: %d errors\n", total_errors);
+}
+
+// ─── PG 스트레스: BEGIN/COMMIT 트랜잭션 + 풀 반납 정확성 ─────
+
+#define PG_STRESS_THREADS  30
+#define PG_STRESS_ITER     100
+
+typedef struct {
+    conn_pool *pool;
+    int        thread_index;
+    int        errors;
+} pg_stress_arg_t;
+
+void *pg_stress_worker(void *arg)
+{
+    pg_stress_arg_t *a = (pg_stress_arg_t *)arg;
+    int i;
+    for (i = 0; i < PG_STRESS_ITER; i++)
+    {
+        PGconn *conn = get_conn(a->pool);
+        if (!conn) { a->errors++; continue; }
+
+        PGresult *res;
+
+        res = PQexec(conn, "BEGIN");
+        if (PQresultStatus(res) != PGRES_COMMAND_OK) { a->errors++; PQclear(res); release_conn(a->pool, conn); continue; }
+        PQclear(res);
+
+        res = PQexec(conn, "SELECT txid_current()");
+        if (PQresultStatus(res) != PGRES_TUPLES_OK) a->errors++;
+        PQclear(res);
+
+        res = PQexec(conn, "COMMIT");
+        if (PQresultStatus(res) != PGRES_COMMAND_OK) a->errors++;
+        PQclear(res);
+
+        release_conn(a->pool, conn);
+    }
+    return NULL;
+}
+
+void test_pg_stress()
+{
+    printf("[RUN] test_pg_stress (%d threads x %d iter, pool=%d)\n",
+           PG_STRESS_THREADS, PG_STRESS_ITER, CONN_SIZE);
+
+    conn_pool *pool = make_pg_pool(PG_CONNINFO, CONN_SIZE);
+    if (!pool) { printf("[SKIP] test_pg_stress: pool 생성 실패\n"); return; }
+
+    pthread_t       threads[PG_STRESS_THREADS];
+    pg_stress_arg_t args[PG_STRESS_THREADS];
+    int i, total_errors = 0;
+
+    RUN_TIMED("test_pg_stress", {
+        for (i = 0; i < PG_STRESS_THREADS; i++)
+        {
+            args[i].pool         = pool;
+            args[i].thread_index = i + 1;
+            args[i].errors       = 0;
+            pthread_create(&threads[i], NULL, pg_stress_worker, &args[i]);
+        }
+        for (i = 0; i < PG_STRESS_THREADS; i++)
+            pthread_join(threads[i], NULL);
+    });
+
+    for (i = 0; i < PG_STRESS_THREADS; i++)
+        total_errors += args[i].errors;
+
+    free_pg_pool(pool);
+
+    if (total_errors == 0)
+        printf("[PASS] test_pg_stress\n");
+    else
+        printf("[FAIL] test_pg_stress: %d errors\n", total_errors);
+}
+
 // ─── main ────────────────────────────────────────────────────
 
 int main()
@@ -284,5 +594,10 @@ int main()
     test_multi_thread();
     test_conn_single();
     test_conn_multi();
+
+    printf("\n--- PG 실접속 테스트 (%s) ---\n", PG_CONNINFO);
+    test_pg_single();
+    test_pg_multi();
+    test_pg_stress();
     return 0;
 }
